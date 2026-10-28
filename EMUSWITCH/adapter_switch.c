@@ -75,6 +75,7 @@ static USB_ExtendedReport_t idleReport;
 static volatile uint8_t sendReport = 0;
 static volatile uint8_t reportLen = 0;
 static volatile uint8_t started = 0;
+static volatile uint8_t startup_stage = 0;
 static volatile uint8_t packet_type = 0;
 static volatile uint8_t value_len = 0;
 static volatile uint8_t spoofReply = 0;
@@ -83,6 +84,95 @@ static volatile uint8_t spoof_initialized = BYTE_STATUS_NSPOOFED;
 volatile uint16_t vid = 0;
 volatile uint16_t pid = 0;
 static volatile uint8_t baudrate = USART_BAUDRATE;
+static volatile uint16_t uart_report_count = 0;
+static volatile uint8_t diagnostics_pending = 0;
+static volatile uint16_t main_loop_count = 0;
+static volatile uint16_t usb_in_count = 0;
+static volatile uint8_t usb_connect_count = 0;
+static volatile uint8_t usb_disconnect_count = 0;
+
+// diagnostic block
+//
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stdint.h>
+
+#define DIAG_MAGIC 0xA73D
+
+enum {
+    RESET_REASON_NONE = 0,
+    RESET_REASON_UART_LENGTH_TIMEOUT = 1,
+    RESET_REASON_UART_PAYLOAD_TIMEOUT = 2,
+    RESET_REASON_HOST_COMMAND = 3,
+    RESET_REASON_INVALID_LENGTH = 4
+};
+
+typedef struct {
+    uint16_t magic;
+    uint8_t reason;
+    uint8_t packet_type;
+    uint8_t expected_length;
+    uint8_t received_length;
+    uint8_t reset_flags;
+    uint16_t reset_count;
+    uint8_t uart_status;
+    uint8_t uart_status_at_reset;
+} adapter_diagnostics_t;
+
+static adapter_diagnostics_t diagnostics
+    __attribute__((section(".noinit")));
+
+static void record_reset(uint8_t reason)
+{
+    diagnostics.magic = DIAG_MAGIC;
+    diagnostics.reason = reason;
+    diagnostics.packet_type = packet_type;
+    diagnostics.expected_length = value_len;
+    diagnostics.received_length = i;
+    diagnostics.uart_status_at_reset = diagnostics.uart_status & ((1 << FE1) | (1 << DOR1) | (1 << UPE1));
+    diagnostics.reset_count++;
+}
+
+static void send_pending_diagnostics(void)
+{
+    if (!diagnostics_pending) {
+        return;
+    }
+
+    diagnostics_pending = 0;
+
+    Serial_SendByte(BYTE_DIAGNOSTICS);
+    Serial_SendByte(21);
+
+    // Reset diagnostics
+    Serial_SendByte(diagnostics.reason);
+    Serial_SendByte(diagnostics.packet_type);
+    Serial_SendByte(diagnostics.expected_length);
+    Serial_SendByte(diagnostics.received_length);
+    Serial_SendByte(diagnostics.reset_flags);
+    Serial_SendByte((uint8_t)(diagnostics.reset_count & 0xFF));
+    Serial_SendByte((uint8_t)(diagnostics.reset_count >> 8));
+
+    // USB diagnostics
+    Serial_SendByte(USB_DeviceState);
+    Serial_SendByte((uint8_t)(main_loop_count & 0xFF));
+    Serial_SendByte((uint8_t)(main_loop_count >> 8));
+    Serial_SendByte((uint8_t)(usb_in_count & 0xFF));
+    Serial_SendByte((uint8_t)(usb_in_count >> 8));
+    Serial_SendByte(usb_connect_count);
+    Serial_SendByte(usb_disconnect_count);
+    Serial_SendByte(startup_stage);
+
+    Serial_SendByte(response_is_reporting_enabled() ? 1 : 0);
+    Serial_SendByte((uint8_t)(uart_report_count & 0xFF));
+    Serial_SendByte((uint8_t)(uart_report_count >> 8));
+    Serial_SendByte(reportLen);
+    Serial_SendByte(diagnostics.uart_status & ((1 << FE1) | (1 << DOR1) | (1 << UPE1)));
+    Serial_SendByte(diagnostics.uart_status_at_reset);
+}
+
+//
+// end diagnostic block
 
 void forceHardReset(void) {
     cli(); // disable interrupts
@@ -90,14 +180,20 @@ void forceHardReset(void) {
     while (1) {} // wait for watchdog to reset processor
 }
 
-static inline bool Serial_WaitByte(volatile uint8_t * byte) {
+static inline bool Serial_WaitByte(volatile uint8_t *byte) {
     do {
-      if (Serial_IsCharReceived()) {
-          *byte = UDR1;
-          return true;
+        uint8_t status = UCSR1A;
+
+        if (status & (1 << RXC1)) {
+            diagnostics.uart_status |=
+                status & ((1 << FE1) | (1 << DOR1) | (1 << UPE1));
+
+            *byte = UDR1;
+            return true;
         }
-  } while (TCNT1 < 625);
-  return false;
+    } while (TCNT1 < 625);
+
+    return false;
 }
 
 static inline void send_spoof_header(void) {
@@ -133,11 +229,13 @@ static inline void handle_packet(void) {
         spoofReplyLen = value_len;
         break;
     case BYTE_RESET:
-        forceHardReset();
+	record_reset(RESET_REASON_HOST_COMMAND);
+	forceHardReset();
         break;
     case BYTE_IN_REPORT:
         sendReport = 1;
         reportLen = value_len;
+	uart_report_count++;
         //no answer
         break;
     case BYTE_IDS:
@@ -160,12 +258,54 @@ static inline void handle_packet(void) {
           Serial_SendByte(baudrate);
         }
         break;
+    /*case BYTE_VERSION:
+        Serial_SendByte(BYTE_VERSION);
+        Serial_SendByte(2);
+        Serial_SendByte(version_major);
+        Serial_SendByte(version_minor);
+        break;
+    }*/
     case BYTE_VERSION:
         Serial_SendByte(BYTE_VERSION);
         Serial_SendByte(2);
         Serial_SendByte(version_major);
         Serial_SendByte(version_minor);
         break;
+
+#if 0
+    case BYTE_DIAGNOSTICS:
+        Serial_SendByte(BYTE_DIAGNOSTICS);
+        Serial_SendByte(19);
+
+        // Existing reset diagnostics (7 bytes)
+        Serial_SendByte(diagnostics.reason);
+        Serial_SendByte(diagnostics.packet_type);
+        Serial_SendByte(diagnostics.expected_length);
+        Serial_SendByte(diagnostics.received_length);
+        Serial_SendByte(diagnostics.reset_flags);
+        Serial_SendByte((uint8_t)(diagnostics.reset_count & 0xFF));
+        Serial_SendByte((uint8_t)(diagnostics.reset_count >> 8));
+
+        // USB diagnostics (7 bytes)
+        Serial_SendByte(USB_DeviceState);
+        Serial_SendByte((uint8_t)(main_loop_count & 0xFF));
+        Serial_SendByte((uint8_t)(main_loop_count >> 8));
+        Serial_SendByte((uint8_t)(usb_in_count & 0xFF));
+        Serial_SendByte((uint8_t)(usb_in_count >> 8));
+        Serial_SendByte(usb_connect_count);
+        Serial_SendByte(usb_disconnect_count);
+	Serial_SendByte(startup_stage);
+
+	Serial_SendByte(response_is_reporting_enabled() ? 1 : 0);
+	Serial_SendByte((uint8_t)(uart_report_count & 0xFF));
+	Serial_SendByte((uint8_t)(uart_report_count >> 8));
+	Serial_SendByte(reportLen);
+
+	break;
+#endif
+    case BYTE_DIAGNOSTICS:
+	diagnostics_pending = 1;
+	break;
     }
 }
 /*
@@ -183,7 +323,10 @@ ISR(USART1_RX_vect) {
 
 ISR(USART1_RX_vect) {
 
+    uint8_t uart_status = UCSR1A;
     packet_type = UDR1;
+
+    diagnostics.uart_status |= uart_status & ((1 << FE1) | (1 << DOR1) | (1 << UPE1));
     /*
      * Reset packet reception timer: assume the maximum reception time for any packet is 10ms, and hard reset the
      * adapter if this time is exceeded. This helps recovering from a transmission error that could deadlock the
@@ -193,22 +336,53 @@ ISR(USART1_RX_vect) {
      */
     TCNT1 = 0;
     if (!Serial_WaitByte(&value_len)) {
-        forceHardReset();
+        // forceHardReset();
+	record_reset(RESET_REASON_UART_LENGTH_TIMEOUT);
+	forceHardReset();
     }
     pdata = (packet_type == BYTE_IN_REPORT) ? report : buf;
+    uint8_t capacity = (packet_type == BYTE_IN_REPORT)
+        ? sizeof(report)
+        : sizeof(buf);
+
+    if (value_len > capacity) {
+        record_reset(RESET_REASON_INVALID_LENGTH);
+        // Record an invalid-length diagnostic here.
+        forceHardReset();
+    }  
     while (i < value_len) {
-        if (!Serial_WaitByte(pdata + (i++))) {
-            forceHardReset();
-        }
+	    if (!Serial_WaitByte(pdata + i)) {
+		    record_reset(RESET_REASON_UART_PAYLOAD_TIMEOUT);
+		    forceHardReset();
+	    }
+	    i++;
+        /*if (!Serial_WaitByte(pdata + (i++))) {
+        	record_reset(RESET_REASON_UART_PAYLOAD_TIMEOUT);
+		forceHardReset();
+        }*/
     }
     i = 0;
     handle_packet();
 }
 
 void SetupHardware(void) {
-
+    uint8_t reset_flags = MCUSR;  // diagnostics
     MCUSR = 0;
     wdt_disable();
+
+    // diagnostics
+    if (diagnostics.magic != DIAG_MAGIC) {
+        diagnostics.magic = DIAG_MAGIC;
+        diagnostics.reason = RESET_REASON_NONE;
+        diagnostics.packet_type = 0;
+        diagnostics.expected_length = 0;
+        diagnostics.received_length = 0;
+        diagnostics.reset_count = 0;
+	diagnostics.uart_status = 0;
+	diagnostics.uart_status_at_reset = 0;
+    }
+    diagnostics.reset_flags = reset_flags;
+    // diagnostics
 
     clock_prescale_set(clock_div_1);
 
@@ -220,15 +394,22 @@ void SetupHardware(void) {
 
     GlobalInterruptEnable();
 
-    while (!started) {}
-
+    startup_stage = 1;  // Waiting for BYTE_START
+    while (!started) {
+    	send_pending_diagnostics();
+    }
+    startup_stage = 2;  // BYTE_START received
     USB_Init();
+
+    startup_stage = 3;  // USB_Init returned
 }
 
 void EVENT_USB_Device_Connect(void) {
+	usb_connect_count++;
 }
 
 void EVENT_USB_Device_Disconnect(void) {
+	usb_disconnect_count++;
 }
 
 void EVENT_USB_Device_ConfigurationChanged(void) {
@@ -310,6 +491,7 @@ void SendNextReport(void) {
     if (Endpoint_IsINReady()) {
         // Received IN interrupt. Switch wants a new packet.
         send_IN_report();
+	usb_in_count++;
     }
 }
 
@@ -363,8 +545,11 @@ int main(void) {
     selectedReport = &idleReport; // Use idle report until data is received from UART
 
     setup_response_manager(CALLBACK_beforeSend, &selectedReport);
+    startup_stage = 4;  // Main loop reached
     while (1) {
         HID_Task();
         USB_USBTask();
+	send_pending_diagnostics();
+	main_loop_count++;
     }
 }

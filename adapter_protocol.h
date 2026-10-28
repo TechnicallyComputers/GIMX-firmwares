@@ -13,6 +13,7 @@
 #define BYTE_CONTROL_DATA 0x44
 #define BYTE_RESET        0x55
 #define BYTE_IDS          0x66
+#define BYTE_DIAGNOSTICS  0x78
 #define BYTE_VERSION      0x77
 #define BYTE_BAUDRATE     0x88
 #define BYTE_DEBUG        0x99

@@ -21,6 +21,10 @@ static bool nextPacketReady = false;
 bool (*before_send)(void) = 0;
 static USB_ExtendedReport_t **selectedReportPtr;
 
+bool response_is_reporting_enabled(void) {
+    return startReport;
+}
+
 void setup_response_manager(bool (*before_callback)(void), USB_ExtendedReport_t **ptr) {
     before_send = before_callback;
     selectedReportPtr = ptr;
@@ -202,18 +206,34 @@ static void prepare_spi_reply(SPI_Address_t address, size_t size) {
 
 static void prepare_standard_report(USB_StandardReport_t *standardReport) {
     if (nextPacketReady) return;
+
     counter += COUNTER_INCREMENT;
+
+    memset(replyBuffer, 0, sizeof(replyBuffer));
+    replyBuffer[0] = 0x30;
+    replyBuffer[1] = counter;
+
     disable_rx_isr();
-    prepare_reply(0x30, counter, (uint8_t *) standardReport, sizeof(USB_StandardReport_t));
+    memcpy(&replyBuffer[2], standardReport, sizeof(USB_StandardReport_t));
     enable_rx_isr();
+
+    nextPacketReady = true;
 }
 
 static void prepare_extended_report(USB_ExtendedReport_t *extendedReport) {
     if (nextPacketReady) return;
+
     counter += COUNTER_INCREMENT;
+
+    memset(replyBuffer, 0, sizeof(replyBuffer));
+    replyBuffer[0] = 0x30;
+    replyBuffer[1] = counter;
+
     disable_rx_isr();
-    prepare_reply(0x30, counter, (uint8_t *) extendedReport, sizeof(USB_ExtendedReport_t));
+    memcpy(&replyBuffer[2], extendedReport, sizeof(USB_ExtendedReport_t));
     enable_rx_isr();
+
+    nextPacketReady = true;
 }
 
 static void prepare_8101(void) {
