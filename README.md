@@ -7,6 +7,9 @@ The goal of this project is to resolve that problem and provide a stable NSW fir
 
 The EMUSWITCH firmware folder has changes I've made to add diagnostics and edit communication behaviours based on the original firmware by Hisptoot
 
+### Switch controller UART stability fix: 
+Reduced the duration of UART receive-interrupt masking in the ATmega32U4 firmware by moving USB response buffer initialization outside the critical section. This appears to have eliminated intermittent UART packet desynchronization and subsequent watchdog resets. Initial validation exceeded two hours of continuous operation without disconnects or desynchronization, compared with approximately five minutes between failures previously.
+
 Build instructions:
 
 To build firmware for NSW:
