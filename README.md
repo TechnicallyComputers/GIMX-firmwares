@@ -10,8 +10,13 @@ The EMUSWITCH firmware folder has changes I've made to add diagnostics and edit 
 Build instructions:
 
 To build firmware for NSW:
+
 `make -C EMUSWITCH`
+
 To install it into local GIMX directory (GIMX must support EMUSWITCH)
+
 `sudo install -Dm644 EMUSWITCH/emu.hex /usr/share/gimx/firmware/EMUSWITCH.hex`
+
 To install into GIMX local repo directly
+
 `cp EMUSWITCH/emu.hex ../GIMX/loader/firmware/EMUSWITCH.hex`
